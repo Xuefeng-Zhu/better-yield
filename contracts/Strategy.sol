@@ -8,9 +8,11 @@ pragma experimental ABIEncoderV2;
 // These are the core Yearn libraries
 import {BaseStrategy, StrategyParams} from "@yearnvaults/contracts/BaseStrategy.sol";
 import {SafeERC20, SafeMath, IERC20, Address} from "@openzeppelin/contracts/token/ERC20/SafeERC20.sol";
+import "@openzeppelin/contracts/math/Math.sol";
 
 // Import interfaces for many popular DeFi projects, or add your own!
 import "./interfaces/IIdleToken.sol";
+import "./interfaces/IUsingTellor.sol";
 import {IUniswapV2Router02} from "./interfaces/Uniswap.sol";
 
 contract Strategy is BaseStrategy {
@@ -22,6 +24,7 @@ contract Strategy is BaseStrategy {
     IERC20 public dai;
     IERC20 public idle;
     IUniswapV2Router02 public uniRouter;
+    IUsingTellor public tellor;
 
     address public weth;
 
@@ -29,7 +32,8 @@ contract Strategy is BaseStrategy {
         address _vault,
         address _weth,
         address _daiIdle,
-        address _uniRouter
+        address _uniRouter,
+        address _tellor
     ) public BaseStrategy(_vault) {
         // You can set these parameters on deployment to whatever you want
         // maxReportDelay = 6300;
@@ -38,6 +42,7 @@ contract Strategy is BaseStrategy {
         weth = _weth;
         daiIdle = IIdleToken(_daiIdle);
         uniRouter = IUniswapV2Router02(_uniRouter);
+        tellor = IUsingTellor(_tellor);
 
         dai = IERC20(daiIdle.token());
         idle = IERC20(daiIdle.IDLE());
@@ -71,11 +76,12 @@ contract Strategy is BaseStrategy {
     }
 
     function estimatedTotalAssets() public view override returns (uint256) {
-        // TODO: Build a more accurate estimate using the value of all positions in terms of `want`
-        return
-            balanceOfWant() +
-            balanceOfDai() +
-            IERC20(address(daiIdle)).balanceOf(address(this));
+        uint256 daiIdleValue = IERC20(address(daiIdle))
+        .balanceOf(address(this))
+        .mul(daiIdle.tokenPriceWithFee(address(this)))
+        .div(_getDaiPrice());
+
+        return balanceOfWant() + balanceOfDai() + daiIdleValue;
     }
 
     function prepareReturn(uint256 _debtOutstanding)
@@ -87,17 +93,35 @@ contract Strategy is BaseStrategy {
             uint256 _debtPayment
         )
     {
-        daiIdle.redeemIdleToken(balanceOfDaiIdle());
-        _swapIdle();
+        // _swapIdle();
 
         uint256 debt = vault.strategies(address(this)).totalDebt;
         uint256 assets = estimatedTotalAssets();
 
-        if (debt > assets) {
-            _loss = debt - assets;
-        } else {
+        if (debt <= assets) {
             _debtPayment = _debtOutstanding;
             _profit = assets - debt;
+
+            uint256 amountToFree = _profit.add(_debtPayment);
+
+            if (balanceOfWant() < amountToFree) {
+                _withdrawSome(amountToFree);
+
+                uint256 wantBalance = balanceOfWant();
+                if (wantBalance < amountToFree) {
+                    if (_profit > wantBalance) {
+                        _profit = wantBalance;
+                        _debtPayment = 0;
+                    } else {
+                        _debtPayment = Math.min(
+                            wantBalance.sub(_profit),
+                            _debtPayment
+                        );
+                    }
+                }
+            }
+        } else {
+            _loss = debt - assets;
         }
     }
 
@@ -115,7 +139,9 @@ contract Strategy is BaseStrategy {
         // Swap the rest of the want
         uint256 wantAvailable = wantBalance.sub(_debtOutstanding);
 
-        daiIdle.mintIdleToken(balanceOfDai(), false, address(0));
+        if (balanceOfDai() > 0) {
+            daiIdle.mintIdleToken(balanceOfDai(), false, address(0));
+        }
     }
 
     function liquidatePosition(uint256 _amountNeeded)
@@ -192,13 +218,27 @@ contract Strategy is BaseStrategy {
         return _amtInWei;
     }
 
+    function _getDaiPrice() internal view returns (uint256) {
+        return 1 ether;
+        (, uint256 price, ) = tellor.getCurrentValue(39);
+        return price * 1000000000000;
+    }
+
     function _withdrawSome(uint256 _amount) internal returns (uint256) {
         uint256 balanceOfWantBefore = balanceOfWant();
-        daiIdle.redeemIdleToken(_amount);
+        daiIdle.redeemIdleToken(
+            _amount.mul(_getDaiPrice()).div(
+                daiIdle.tokenPriceWithFee(address(this))
+            )
+        );
         return balanceOfWant().sub(balanceOfWantBefore);
     }
 
     function _swapIdle() internal {
+        if (balanceOfIdle() == 0) {
+            return;
+        }
+
         address[] memory path = new address[](3);
         path[0] = address(idle);
         path[1] = address(weth);

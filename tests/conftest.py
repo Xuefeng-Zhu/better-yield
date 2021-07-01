@@ -86,7 +86,11 @@ def strategy(strategist, keeper, vault, Strategy, gov):
         "0x3fE7940616e5Bc47b0775a0dccf6237893353bB4", owner=gov)
     uni_router = Contract(
         "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D", owner=gov)
-    strategy = strategist.deploy(Strategy, vault, weth, dai_idle, uni_router)
+    tellor = Contract(
+        "0xB2b6c6232d38faE21656703cAC5A74e5314741D4", owner=gov)
+
+    strategy = strategist.deploy(
+        Strategy, vault, weth, dai_idle, uni_router, tellor)
     strategy.setKeeper(keeper)
     vault.addStrategy(strategy, 10_000, 0, 2 ** 256 - 1, 1_000, {"from": gov})
     yield strategy
