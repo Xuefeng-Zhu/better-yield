@@ -12,7 +12,9 @@ import "@openzeppelin/contracts/math/Math.sol";
 
 // Import interfaces for many popular DeFi projects, or add your own!
 import "./interfaces/IIdleToken.sol";
-import "./interfaces/IUsingTellor.sol";
+import "./interfaces/IUmbrella.sol";
+import "./interfaces/IChainlink.sol";
+import "./interfaces/IDMM.sol";
 import {IUniswapV2Router02} from "./interfaces/Uniswap.sol";
 
 contract Strategy is BaseStrategy {
@@ -23,33 +25,82 @@ contract Strategy is BaseStrategy {
     IIdleToken public daiIdle;
     IERC20 public dai;
     IERC20 public idle;
+    IDMMExchangeRouter public dmmRouter;
     IUniswapV2Router02 public uniRouter;
-    IUsingTellor public tellor;
+    IChain public umbrella;
+    AggregatorV3Interface public daiFeed;
+    AggregatorV3Interface public ethFeed;
 
     address public weth;
+    bool public useDmm;
+    bool public useUmb;
+    address[] public lusdDaiPools;
+    address[] public lusdDaiPath;
 
     constructor(
         address _vault,
+        address _lusd,
         address _weth,
         address _daiIdle,
+        address _dmmRouter,
         address _uniRouter,
-        address _tellor
+        address _umbrella,
+        address _daiFeed,
+        address _ethFeed
     ) public BaseStrategy(_vault) {
         // You can set these parameters on deployment to whatever you want
         // maxReportDelay = 6300;
         // profitFactor = 100;
         // debtThreshold = 0;
+        require(address(want) == _lusd, "want needs to be lusd");
+
         weth = _weth;
         daiIdle = IIdleToken(_daiIdle);
+        dmmRouter = IDMMExchangeRouter(_dmmRouter);
         uniRouter = IUniswapV2Router02(_uniRouter);
-        tellor = IUsingTellor(_tellor);
+        umbrella = IChain(_umbrella);
+        daiFeed = AggregatorV3Interface(_daiFeed);
+        ethFeed = AggregatorV3Interface(_ethFeed);
 
         dai = IERC20(daiIdle.token());
         idle = IERC20(daiIdle.IDLE());
 
-        dai.safeApprove(_daiIdle, uint256(-1));
+        want.safeApprove(_dmmRouter, uint256(-1));
+        want.safeApprove(_uniRouter, uint256(-1));
+        dai.safeApprove(_dmmRouter, uint256(-1));
         dai.safeApprove(_uniRouter, uint256(-1));
         idle.safeApprove(_uniRouter, uint256(-1));
+        dai.safeApprove(_daiIdle, uint256(-1));
+
+        useDmm = false;
+        useUmb = false;
+    }
+
+    function setUseDmm(bool _useDmm) external onlyAuthorized {
+        useDmm = _useDmm;
+    }
+
+    function setUseUmb(bool _useUmb) external onlyAuthorized {
+        useUmb = _useUmb;
+    }
+
+    function setDmmPoolPath(
+        address[] calldata _lusdDaiPools,
+        address[] calldata _lusdDaiPath
+    ) external onlyAuthorized {
+        require(_lusdDaiPools.length + 1 == _lusdDaiPath.length);
+        require(_lusdDaiPath[0] == address(want));
+        require(_lusdDaiPath[_lusdDaiPath.length] == address(dai));
+
+        delete lusdDaiPools;
+        delete lusdDaiPath;
+
+        for (uint256 i = 0; i < _lusdDaiPools.length; i++) {
+            lusdDaiPools.push(_lusdDaiPools[i]);
+            lusdDaiPath.push(_lusdDaiPath[i]);
+        }
+
+        lusdDaiPath.push(_lusdDaiPath[_lusdDaiPath.length - 1]);
     }
 
     // ******** OVERRIDE THESE METHODS FROM BASE CONTRACT ************
@@ -93,7 +144,8 @@ contract Strategy is BaseStrategy {
             uint256 _debtPayment
         )
     {
-        // _swapIdle();
+        daiIdle.redeemIdleToken(0);
+        _swapIdleToDai();
 
         uint256 debt = vault.strategies(address(this)).totalDebt;
         uint256 assets = estimatedTotalAssets();
@@ -138,6 +190,7 @@ contract Strategy is BaseStrategy {
 
         // Swap the rest of the want
         uint256 wantAvailable = wantBalance.sub(_debtOutstanding);
+        _swapLusdToDai(wantAvailable);
 
         if (balanceOfDai() > 0) {
             daiIdle.mintIdleToken(balanceOfDai(), false, address(0));
@@ -214,14 +267,27 @@ contract Strategy is BaseStrategy {
         override
         returns (uint256)
     {
-        // TODO create an accurate price oracle
-        return _amtInWei;
+        if (useUmb) {
+            (uint256 price, ) = umbrella.getCurrentValue(
+                0x000000000000000000000000000000000000000000000000004554482d555344
+            );
+            return price.mul(_amtInWei);
+        }
+
+        (, int256 price, , , ) = ethFeed.latestRoundData();
+        return uint256(price).mul(10000000000).mul(_amtInWei);
     }
 
     function _getDaiPrice() internal view returns (uint256) {
-        return 1 ether;
-        (, uint256 price, ) = tellor.getCurrentValue(39);
-        return price * 1000000000000;
+        if (useUmb) {
+            (uint256 price, ) = umbrella.getCurrentValue(
+                0x000000000000000000000000000000000000000000000000004441492d555344
+            );
+            return price;
+        }
+
+        (, int256 price, , , ) = daiFeed.latestRoundData();
+        return uint256(price).mul(10000000000);
     }
 
     function _withdrawSome(uint256 _amount) internal returns (uint256) {
@@ -231,10 +297,92 @@ contract Strategy is BaseStrategy {
                 daiIdle.tokenPriceWithFee(address(this))
             )
         );
+
+        _swapDaiToLusd(_amount);
         return balanceOfWant().sub(balanceOfWantBefore);
     }
 
-    function _swapIdle() internal {
+    function _swapLusdToDai(uint256 _amount) internal {
+        if (_amount == 0) {
+            return;
+        }
+
+        if (useDmm) {
+            address[] memory pools = new address[](lusdDaiPools.length);
+            for (uint256 i = 0; i < lusdDaiPools.length; i++) {
+                pools[i] = lusdDaiPools[i];
+            }
+
+            IERC20[] memory path = new IERC20[](lusdDaiPath.length);
+            for (uint256 i = 0; i < lusdDaiPath.length; i++) {
+                path[i] = IERC20(lusdDaiPath[i]);
+            }
+
+            dmmRouter.swapExactTokensForTokens(
+                _amount,
+                uint256(0),
+                pools,
+                path,
+                address(this),
+                now
+            );
+            return;
+        }
+
+        address[] memory path = new address[](2);
+        path[0] = address(want);
+        path[1] = address(dai);
+
+        uniRouter.swapExactTokensForTokens(
+            _amount,
+            uint256(0),
+            path,
+            address(this),
+            now
+        );
+    }
+
+    function _swapDaiToLusd(uint256 _amount) internal {
+        if (_amount == 0) {
+            return;
+        }
+
+        if (useDmm) {
+            address[] memory pools = new address[](lusdDaiPools.length);
+            for (uint256 i = 0; i < lusdDaiPools.length; i++) {
+                pools[i] = lusdDaiPools[lusdDaiPools.length - 1 - i];
+            }
+
+            IERC20[] memory path = new IERC20[](lusdDaiPath.length);
+            for (uint256 i = 0; i < lusdDaiPath.length; i++) {
+                path[i] = IERC20(lusdDaiPath[lusdDaiPath.length - 1 - i]);
+            }
+
+            dmmRouter.swapTokensForExactTokens(
+                _amount,
+                uint256(0),
+                pools,
+                path,
+                address(this),
+                now
+            );
+            return;
+        }
+
+        address[] memory path = new address[](2);
+        path[0] = address(dai);
+        path[1] = address(want);
+
+        uniRouter.swapTokensForExactTokens(
+            _amount,
+            uint256(0),
+            path,
+            address(this),
+            now
+        );
+    }
+
+    function _swapIdleToDai() internal {
         if (balanceOfIdle() == 0) {
             return;
         }
