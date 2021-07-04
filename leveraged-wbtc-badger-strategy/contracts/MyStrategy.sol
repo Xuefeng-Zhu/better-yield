@@ -112,6 +112,12 @@ contract MyStrategy is BaseStrategy {
         _onlyGovernance();
     }
 
+    function setLeveragePercent(uint256 _leveragePercent) external {
+        _onlyGovernance();
+        leveragePercent = _leveragePercent;
+        _borrow();
+    }
+
     /// ===== Internal Core Implementations =====
 
     /// @dev security check to avoid moving tokens that would cause a rugpull, edit based on strat
