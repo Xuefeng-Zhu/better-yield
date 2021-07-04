@@ -12,7 +12,6 @@ import "../deps/@openzeppelin/contracts-upgradeable/token/ERC20/SafeERC20Upgrade
 import "../interfaces/badger/IController.sol";
 import "../interfaces/compound/ICErc20.sol";
 import "../interfaces/compound/IComptroller.sol";
-import "../interfaces/tellor/IUsingTellor.sol";
 import "../interfaces/uniswap/IUniswapRouterV2.sol";
 
 import {BaseStrategy} from "../deps/BaseStrategy.sol";
@@ -23,23 +22,15 @@ contract MyStrategy is BaseStrategy {
     using SafeMathUpgradeable for uint256;
 
     // address public want // Inherited from BaseStrategy, the token the strategy wants, swaps into and tries to grow
-    address public cErc20; // Token we provide liquidity with
-    address public reward; // Token we farm and swap to want / cErc20
+    ICErc20 public cErc20; // Token we provide liquidity with
+    IERC20Upgradeable public reward; // Token we farm and swap to want / cErc20
     uint256 public leveragePercent;
-    uint256 public borrowTellorId;
-    ICErc20 public cBorrowToken;
-
-    uint256 public constant BTC_TELLOR_ID = 2;
 
     address public constant WETH = 0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D;
-    IERC20Upgradeable public constant COMP =
-        IERC20Upgradeable(0xc00e94Cb662C3520282E6f5717214004A7f26888);
     IComptroller public constant COMPTROLLER =
         IComptroller(0x3d9819210A31b4961b30EF54bE2aeD79B9c9Cd3B);
     IUniswapRouterV2 public constant DEX =
         IUniswapRouterV2(0xE592427A0AEce92De3Edee1F18E0157C05861564);
-    IUsingTellor public constant TELLOR =
-        IUsingTellor(0x88dF592F8eb5D7Bd38bFeF7dEb0fBc02cf3778a0);
 
     function initialize(
         address _governance,
@@ -60,8 +51,8 @@ contract MyStrategy is BaseStrategy {
 
         /// @dev Add config here
         want = _wantConfig[0];
-        cErc20 = _wantConfig[1];
-        reward = _wantConfig[2];
+        cErc20 = ICErc20(_wantConfig[1]);
+        reward = IERC20Upgradeable(_wantConfig[2]);
 
         performanceFeeGovernance = _feeConfig[0];
         performanceFeeStrategist = _feeConfig[1];
@@ -71,20 +62,11 @@ contract MyStrategy is BaseStrategy {
 
         /// @dev do one off approvals here
         IERC20Upgradeable(want).safeApprove(cErc20, type(uint256).max);
-        IERC20Upgradeable(cBorrowToken.underlying()).safeApprove(
-            address(cBorrowToken),
-            type(uint256).max
-        );
 
-        COMP.safeApprove(address(DEX), type(uint256).max);
-        IERC20Upgradeable(cBorrowToken.underlying()).safeApprove(
-            address(DEX),
-            type(uint256).max
-        );
+        reward.safeApprove(address(DEX), type(uint256).max);
 
-        address[] memory cTokens = new address[](2);
-        cTokens[0] = cErc20;
-        cTokens[1] = address(cBorrowToken);
+        address[] memory cTokens = new address[](1);
+        cTokens[0] = address(cErc20);
         COMPTROLLER.enterMarkets(cTokens);
     }
 
@@ -110,13 +92,6 @@ contract MyStrategy is BaseStrategy {
         return balanceOfWant() > 0;
     }
 
-    function balanceOfBorrowToken() public returns (uint256) {
-        return
-            IERC20Upgradeable(cBorrowToken.underlying()).balanceOf(
-                address(this)
-            );
-    }
-
     // @dev These are the tokens that cannot be moved except by the vault
     function getProtectedTokens()
         public
@@ -126,8 +101,8 @@ contract MyStrategy is BaseStrategy {
     {
         address[] memory protectedTokens = new address[](3);
         protectedTokens[0] = want;
-        protectedTokens[1] = cErc20;
-        protectedTokens[2] = reward;
+        protectedTokens[1] = address(cErc20);
+        protectedTokens[2] = address(reward);
         return protectedTokens;
     }
 
@@ -156,18 +131,15 @@ contract MyStrategy is BaseStrategy {
     /// @notice Just get the current balance and then invest accordingly
     function _deposit(uint256 _amount) internal override {
         ICErc20(cErc20).mint(_amount);
+        _borrow();
     }
 
     function _borrow() internal {
-        (, uint256 btcPrice, ) = TELLOR.getCurrentValue(BTC_TELLOR_ID);
-        (, uint256 borrowTokenPrice, ) = TELLOR.getCurrentValue(borrowTellorId);
-
-        uint256 collateralValue =
-            ICErc20(cErc20).balanceOfUnderlying(address(this)).mul(btcPrice);
-        uint256 canBorrowAmount =
-            collateralValue.mul(leveragePercent).div(100).div(borrowTokenPrice);
-        uint256 borrowBalance =
-            cBorrowToken.borrowBalanceCurrent(address(this));
+        uint256 borrowBalance = cErc20.borrowBalanceCurrent(address(this));
+        uint256 baseCollateral = cErc20.balanceOfUnderlying(address(this)).sub(
+            borrowBalance
+        );
+        uint256 canBorrowAmount = baseCollateral.mul(leveragePercent).div(100);
 
         if (borrowBalance > canBorrowAmount) {
             _repay(borrowBalance.sub(canBorrowAmount));
@@ -175,12 +147,14 @@ contract MyStrategy is BaseStrategy {
         }
 
         uint256 toBorrow = canBorrowAmount.sub(borrowBalance);
-        cBorrowToken.borrow(toBorrow);
-        cBorrowToken.mint(toBorrow);
+        cErc20.borrow(toBorrow);
+        cErc20.mint(toBorrow);
     }
 
     /// @dev utility function to withdraw everything for migration
-    function _withdrawAll() internal override {}
+    function _withdrawAll() internal override {
+        _withdrawSome(cErc20.balanceOfUnderlying(address(this)));
+    }
 
     /// @dev withdraw the specified amount of want, liquidate from cErc20 to want, paying off any necessary debt for the conversion
     function _withdrawSome(uint256 _amount)
@@ -188,41 +162,24 @@ contract MyStrategy is BaseStrategy {
         override
         returns (uint256)
     {
+        _repay(_amount.mul(leveragePercent).div(100));
+
+        _amount = MathUpgradeable.min(
+            _amount,
+            cErc20.balanceOfUnderlying(address(this))
+        );
+        cErc20.redeemUnderlying(_amount);
+
         return _amount;
     }
 
     function _repay(uint256 _amount) internal {
-        uint256 borrowTokenBalance =
-            cBorrowToken.balanceOfUnderlying(address(this));
-        cBorrowToken.redeemUnderlying(
-            MathUpgradeable.min(_amount, borrowTokenBalance)
+        _amount = MathUpgradeable.min(
+            _amount,
+            cErc20.borrowBalanceCurrent(address(this))
         );
-
-        if (borrowTokenBalance < _amount) {
-            COMPTROLLER.claimComp(address(this));
-            _swapComp();
-        }
-
-        cBorrowToken.repayBorrow(_amount);
-
-        if (balanceOfBorrowToken() > 0) {
-            cBorrowToken.mint(balanceOfBorrowToken());
-        }
-    }
-
-    function _swapComp() internal {
-        address[] memory paths = new address[](3);
-        paths[0] = address(COMP);
-        paths[1] = WETH;
-        paths[2] = cBorrowToken.underlying();
-
-        DEX.swapExactTokensForTokens(
-            COMP.balanceOf(address(this)),
-            uint256(0),
-            paths,
-            address(this),
-            now
-        );
+        cErc20.redeemUnderlying(_amount);
+        cErc20.repayBorrow(_amount);
     }
 
     /// @dev Harvest from strategy mechanics, realizing increase in underlying position
@@ -231,19 +188,42 @@ contract MyStrategy is BaseStrategy {
 
         uint256 _before = IERC20Upgradeable(want).balanceOf(address(this));
 
-        // Write your code here
+        COMPTROLLER.claimComp(address(this));
+        if (reward.balanceOf(address(this)) == 0) {
+            return 0;
+        }
 
-        uint256 earned =
-            IERC20Upgradeable(want).balanceOf(address(this)).sub(_before);
+        _swapComp();
+
+        uint256 earned = IERC20Upgradeable(want).balanceOf(address(this)).sub(
+            _before
+        );
 
         /// @notice Keep this in so you get paid!
-        (uint256 governancePerformanceFee, uint256 strategistPerformanceFee) =
-            _processPerformanceFees(earned);
+        (
+            uint256 governancePerformanceFee,
+            uint256 strategistPerformanceFee
+        ) = _processPerformanceFees(earned);
 
         /// @dev Harvest event that every strategy MUST have, see BaseStrategy
         emit Harvest(earned, block.number);
 
         return earned;
+    }
+
+    function _swapComp() internal {
+        address[] memory paths = new address[](3);
+        paths[0] = address(reward);
+        paths[1] = WETH;
+        paths[2] = want;
+
+        DEX.swapExactTokensForTokens(
+            reward.balanceOf(address(this)),
+            uint256(0),
+            paths,
+            address(this),
+            now
+        );
     }
 
     // Alternative Harvest with Price received from harvester, used to avoid exessive front-running
@@ -256,6 +236,7 @@ contract MyStrategy is BaseStrategy {
     /// @dev Rebalance, Compound or Pay off debt here
     function tend() external whenNotPaused {
         _onlyAuthorizedActors();
+        _deposit(balanceOfWant());
     }
 
     /// ===== Internal Helper Functions =====
