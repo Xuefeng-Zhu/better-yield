@@ -6,16 +6,24 @@ pragma solidity 0.6.12;
 pragma experimental ABIEncoderV2;
 
 // These are the core Yearn libraries
-import {BaseStrategy, StrategyParams} from "@yearnvaults/contracts/BaseStrategy.sol";
-import {SafeERC20, SafeMath, IERC20, Address} from "@openzeppelin/contracts/token/ERC20/SafeERC20.sol";
+import {
+    BaseStrategy,
+    StrategyParams
+} from "@yearnvaults/contracts/BaseStrategy.sol";
+import {
+    SafeERC20,
+    SafeMath,
+    IERC20,
+    Address
+} from "@openzeppelin/contracts/token/ERC20/SafeERC20.sol";
 import "@openzeppelin/contracts/math/Math.sol";
 
 // Import interfaces for many popular DeFi projects, or add your own!
-import "./interfaces/IIdleToken.sol";
-import "./interfaces/IUmbrella.sol";
-import "./interfaces/IChainlink.sol";
-import "./interfaces/IDMM.sol";
-import {IUniswapV2Router02} from "./interfaces/Uniswap.sol";
+import "../interfaces/IIdleToken.sol";
+import "../interfaces/IUmbrella.sol";
+import "../interfaces/IChainlink.sol";
+import "../interfaces/IDMM.sol";
+import {IUniswapV2Router02} from "../interfaces/Uniswap.sol";
 
 contract Strategy is BaseStrategy {
     using SafeERC20 for IERC20;
@@ -127,10 +135,11 @@ contract Strategy is BaseStrategy {
     }
 
     function estimatedTotalAssets() public view override returns (uint256) {
-        uint256 daiIdleValue = IERC20(address(daiIdle))
-        .balanceOf(address(this))
-        .mul(daiIdle.tokenPriceWithFee(address(this)))
-        .div(_getDaiPrice());
+        uint256 daiIdleValue =
+            IERC20(address(daiIdle))
+                .balanceOf(address(this))
+                .mul(daiIdle.tokenPriceWithFee(address(this)))
+                .div(_getDaiPrice());
 
         return balanceOfWant() + balanceOfDai() + daiIdleValue;
     }
@@ -268,9 +277,10 @@ contract Strategy is BaseStrategy {
         returns (uint256)
     {
         if (useUmb) {
-            (uint256 price, ) = umbrella.getCurrentValue(
-                0x000000000000000000000000000000000000000000000000004554482d555344
-            );
+            (uint256 price, ) =
+                umbrella.getCurrentValue(
+                    0x000000000000000000000000000000000000000000000000004554482d555344
+                );
             return price.mul(_amtInWei);
         }
 
@@ -280,9 +290,10 @@ contract Strategy is BaseStrategy {
 
     function _getDaiPrice() internal view returns (uint256) {
         if (useUmb) {
-            (uint256 price, ) = umbrella.getCurrentValue(
-                0x000000000000000000000000000000000000000000000000004441492d555344
-            );
+            (uint256 price, ) =
+                umbrella.getCurrentValue(
+                    0x000000000000000000000000000000000000000000000000004441492d555344
+                );
             return price;
         }
 
