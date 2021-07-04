@@ -61,7 +61,7 @@ contract MyStrategy is BaseStrategy {
         leveragePercent = 50;
 
         /// @dev do one off approvals here
-        IERC20Upgradeable(want).safeApprove(cErc20, type(uint256).max);
+        IERC20Upgradeable(want).safeApprove(address(cErc20), type(uint256).max);
 
         reward.safeApprove(address(DEX), type(uint256).max);
 
@@ -84,7 +84,7 @@ contract MyStrategy is BaseStrategy {
 
     /// @dev Balance of want currently held in strategy positions
     function balanceOfPool() public view override returns (uint256) {
-        return IERC20Upgradeable(cErc20).balanceOf(address(this));
+        return cErc20.balanceOf(address(this));
     }
 
     /// @dev Returns true if this strategy requires tending
