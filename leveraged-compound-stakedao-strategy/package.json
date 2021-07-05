@@ -28,6 +28,7 @@
     "prettier": "^2.3.0"
   },
   "scripts": {
-    "prettier": "prettier --write 'contracts/**/*.sol'"
+    "prettier": "prettier --write 'contracts/**/*.sol'",
+    "compile": "hardhat compile"
   }
 }

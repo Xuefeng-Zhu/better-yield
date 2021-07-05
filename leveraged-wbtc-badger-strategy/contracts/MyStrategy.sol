@@ -136,7 +136,7 @@ contract MyStrategy is BaseStrategy {
     /// @notice When this function is called, the controller has already sent want to this
     /// @notice Just get the current balance and then invest accordingly
     function _deposit(uint256 _amount) internal override {
-        ICErc20(cErc20).mint(_amount);
+        cErc20.mint(_amount);
         _borrow();
     }
 

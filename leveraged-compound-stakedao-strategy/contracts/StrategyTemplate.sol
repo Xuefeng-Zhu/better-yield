@@ -7,6 +7,11 @@ import "@openzeppelin/contracts/math/SafeMath.sol";
 import "@openzeppelin/contracts/utils/Address.sol";
 import "@openzeppelin/contracts/token/ERC20/SafeERC20.sol";
 
+import "./interfaces/compound/ICErc20.sol";
+import "./interfaces/compound/IComptroller.sol";
+import "./interfaces/uniswap/IUniswapRouterV2.sol";
+import "./interfaces/tellor/IUsingTellor.sol";
+
 interface IController {
     function withdraw(address, uint256) external;
 
@@ -28,19 +33,31 @@ contract StrategyIronUsdc {
     using Address for address;
     using SafeMath for uint256;
 
-    //usdc
-    address public constant want = address(
-        0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174
-    );
+    //wbtc
+    address public constant want =
+        address(0xd3A691C852CDB01E281545A27064741F0B7f6825);
+    address public constant weth = 0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D;
+
+    ICErc20 public cErc20 = ICErc20(0xa1faa15655b0e7b6b6470ed3d096390e6ad93abb);
+    IERC20 public reward = IERC20(0x61460874a7196d6a22D1eE4922473664b3E95270);
+    IComptroller public constant comptroller =
+        IComptroller(0x5eAe89DC1C671724A672ff0630122ee834098657);
+    IUniswapRouterV2 public constant dex =
+        IUniswapRouterV2(0xE592427A0AEce92De3Edee1F18E0157C05861564);
+    IUsingTellor public constant tellor =
+        IUsingTellor(0x20374E579832859f180536A69093A126Db1c8aE9);
 
     uint256 public performanceFee = 1500;
     uint256 public withdrawalFee = 50;
     uint256 public constant FEE_DENOMINATOR = 10000;
+    uint256 public constant WBTC_BORROW_APY_ID = 100;
+    uint256 public constant WBTC_BORROW__COMP_APY_ID = 101;
 
     address public governance;
     address public controller;
     address public strategist;
 
+    uint256 public leveragePercent;
     uint256 public earned;
 
     event Harvested(uint256 wantEarned, uint256 lifetimeEarned);
@@ -59,10 +76,13 @@ contract StrategyIronUsdc {
         governance = msg.sender;
         strategist = msg.sender;
         controller = _controller;
+
+        IERC20(want).safeApprove(address(cErc20), type(uint256).max);
+        reward.safeApprove(address(dex), type(uint256).max);
     }
 
     function getName() external pure returns (string memory) {
-        return "StrategyIron";
+        return "StrategyLeverageComp";
     }
 
     function setStrategist(address _strategist) external {
@@ -84,8 +104,62 @@ contract StrategyIronUsdc {
         performanceFee = _performanceFee;
     }
 
+    function submitValue(uint256 _requestId, uint256 _value)
+        external
+        onlyGovernance
+    {
+        tellor.submitValue(_requestId, _value);
+    }
+
+    function setLeveragePercent(uint256 _leveragePercent)
+        external
+        onlyGovernance
+    {
+        leveragePercent = _leveragePercent;
+        _borrow();
+    }
+
     function deposit() public {
-        // to be implemented
+        cErc20.mint(_amount);
+        _borrow();
+    }
+
+    function _borrow() internal {
+        uint256 borrowBalance = cErc20.borrowBalanceCurrent(address(this));
+        uint256 baseCollateral = cErc20.balanceOfUnderlying(address(this)).sub(
+            borrowBalance
+        );
+        uint256 canBorrowAmount = baseCollateral.mul(leveragePercent).div(100);
+
+        if (borrowBalance > canBorrowAmount) {
+            _repay(borrowBalance.sub(canBorrowAmount));
+            return;
+        }
+
+        uint256 borrowApy = _getCurrentValue(WBTC_BORROW_APY_ID);
+        uint256 borrowCompApy = _getCurrentValue(WBTC_BORROW_COMP_APY_ID);
+
+        // not borrow if comp apy cannot cover borrow apy
+        if (borrowCompApy < borrowApy) {
+            return;
+        }
+
+        uint256 toBorrow = canBorrowAmount.sub(borrowBalance);
+        cErc20.borrow(toBorrow);
+        cErc20.mint(toBorrow);
+    }
+
+    function _getCurrentValue(uint256 _requestId)
+        internal
+        view
+        returns (uint256 value)
+    {
+        uint256 count = tellor.getNewValueCountbyRequestId(_requestId);
+        uint256 timestamp = tellor.getTimestampbyRequestIDandIndex(
+            _requestId,
+            count - 1
+        );
+        return tellor.retrieveData(_requestId, timestamp);
     }
 
     function withdraw(IERC20 _asset)
@@ -112,7 +186,22 @@ contract StrategyIronUsdc {
     }
 
     function _withdrawSome(uint256 _amount) internal {
-        // to be implemented
+        _repay(_amount.mul(leveragePercent).div(100));
+
+        _amount = MathUpgradeable.min(
+            _amount,
+            cErc20.balanceOfUnderlying(address(this))
+        );
+        cErc20.redeemUnderlying(_amount);
+    }
+
+    function _repay(uint256 _amount) internal {
+        _amount = MathUpgradeable.min(
+            _amount,
+            cErc20.borrowBalanceCurrent(address(this))
+        );
+        cErc20.redeemUnderlying(_amount);
+        cErc20.repayBorrow(_amount);
     }
 
     // Withdraw all funds, normally used when migrating strategies
@@ -127,11 +216,24 @@ contract StrategyIronUsdc {
     }
 
     function _withdrawAll() internal {
-        // to be implemented
+        _withdrawSome(cErc20.balanceOfUnderlying(address(this)));
     }
 
     function harvest() public {
-        // to be implemented
+        comptroller.claimComp(address(this));
+
+        address[] memory paths = new address[](3);
+        paths[0] = address(reward);
+        paths[1] = weth;
+        paths[2] = want;
+
+        dex.swapExactTokensForTokens(
+            reward.balanceOf(address(this)),
+            uint256(0),
+            paths,
+            address(this),
+            now
+        );
     }
 
     function balanceOfWant() public view returns (uint256) {
@@ -139,7 +241,7 @@ contract StrategyIronUsdc {
     }
 
     function balanceOfPool() public view returns (uint256) {
-        // to be implemented
+        return cErc20.balanceOf(address(this));
     }
 
     function balanceOf() public view returns (uint256) {
