@@ -1,9 +1,10 @@
-pragma solidity ^0.5.17;
+pragma solidity ^0.5.16;
 pragma experimental ABIEncoderV2;
 
 // yarn add @openzeppelin/contracts@2.5.1
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/math/SafeMath.sol";
+import "@openzeppelin/contracts/math/Math.sol";
 import "@openzeppelin/contracts/utils/Address.sol";
 import "@openzeppelin/contracts/token/ERC20/SafeERC20.sol";
 
@@ -38,7 +39,7 @@ contract StrategyIronUsdc {
         address(0xd3A691C852CDB01E281545A27064741F0B7f6825);
     address public constant weth = 0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D;
 
-    ICErc20 public cErc20 = ICErc20(0xa1faa15655b0e7b6b6470ed3d096390e6ad93abb);
+    ICErc20 public cErc20 = ICErc20(0xa1fAA15655B0e7b6B6470ED3d096390e6aD93Abb);
     IERC20 public reward = IERC20(0x61460874a7196d6a22D1eE4922473664b3E95270);
     IComptroller public constant comptroller =
         IComptroller(0x5eAe89DC1C671724A672ff0630122ee834098657);
@@ -51,7 +52,7 @@ contract StrategyIronUsdc {
     uint256 public withdrawalFee = 50;
     uint256 public constant FEE_DENOMINATOR = 10000;
     uint256 public constant WBTC_BORROW_APY_ID = 100;
-    uint256 public constant WBTC_BORROW__COMP_APY_ID = 101;
+    uint256 public constant WBTC_BORROW_COMP_APY_ID = 101;
 
     address public governance;
     address public controller;
@@ -77,8 +78,8 @@ contract StrategyIronUsdc {
         strategist = msg.sender;
         controller = _controller;
 
-        IERC20(want).safeApprove(address(cErc20), type(uint256).max);
-        reward.safeApprove(address(dex), type(uint256).max);
+        IERC20(want).safeApprove(address(cErc20), uint256(-1));
+        reward.safeApprove(address(dex), uint256(-1));
     }
 
     function getName() external pure returns (string memory) {
@@ -120,7 +121,7 @@ contract StrategyIronUsdc {
     }
 
     function deposit() public {
-        cErc20.mint(_amount);
+        cErc20.mint(balanceOfWant());
         _borrow();
     }
 
@@ -188,18 +189,12 @@ contract StrategyIronUsdc {
     function _withdrawSome(uint256 _amount) internal {
         _repay(_amount.mul(leveragePercent).div(100));
 
-        _amount = MathUpgradeable.min(
-            _amount,
-            cErc20.balanceOfUnderlying(address(this))
-        );
+        _amount = Math.min(_amount, cErc20.balanceOfUnderlying(address(this)));
         cErc20.redeemUnderlying(_amount);
     }
 
     function _repay(uint256 _amount) internal {
-        _amount = MathUpgradeable.min(
-            _amount,
-            cErc20.borrowBalanceCurrent(address(this))
-        );
+        _amount = Math.min(_amount, cErc20.borrowBalanceCurrent(address(this)));
         cErc20.redeemUnderlying(_amount);
         cErc20.repayBorrow(_amount);
     }
