@@ -11,5 +11,19 @@ from helpers.time import days
 """
 
 
-def test_my_custom_test(deployed):
-  assert False
+def test_my_custom_test(want, deployer, vault, strategy, aavePool, aaveRewards):
+    balance = want.balanceOf(deployer)
+    want.approve(vault, balance, {"from": deployer})
+    vault.deposit(balance, {"from": deployer})
+    vault.earn({"from": deployer})
+
+    chain.sleep(15)
+    chain.mine(500)
+
+    cErc20 = Contract.from_explorer(strategy.cErc20())
+
+    assert strategy.balanceOfPool() == cErc20.balanceOf(strategy)
+
+    # If we deposited, then we must have some rewards
+
+    assert aaveRewards.getRewardsBalance([cErc20], strategy) > 0
