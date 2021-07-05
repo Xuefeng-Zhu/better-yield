@@ -6,16 +6,8 @@ pragma solidity 0.6.12;
 pragma experimental ABIEncoderV2;
 
 // These are the core Yearn libraries
-import {
-    BaseStrategy,
-    StrategyParams
-} from "@yearnvaults/contracts/BaseStrategy.sol";
-import {
-    SafeERC20,
-    SafeMath,
-    IERC20,
-    Address
-} from "@openzeppelin/contracts/token/ERC20/SafeERC20.sol";
+import {BaseStrategy, StrategyParams} from "@yearnvaults/contracts/BaseStrategy.sol";
+import {SafeERC20, SafeMath, IERC20, Address} from "@openzeppelin/contracts/token/ERC20/SafeERC20.sol";
 import "@openzeppelin/contracts/math/Math.sol";
 
 // Import interfaces for many popular DeFi projects, or add your own!
@@ -135,11 +127,10 @@ contract Strategy is BaseStrategy {
     }
 
     function estimatedTotalAssets() public view override returns (uint256) {
-        uint256 daiIdleValue =
-            IERC20(address(daiIdle))
-                .balanceOf(address(this))
-                .mul(daiIdle.tokenPriceWithFee(address(this)))
-                .div(_getDaiPrice());
+        uint256 daiIdleValue = IERC20(address(daiIdle))
+        .balanceOf(address(this))
+        .mul(daiIdle.tokenPriceWithFee(address(this)))
+        .div(_getDaiPrice());
 
         return balanceOfWant() + balanceOfDai() + daiIdleValue;
     }
@@ -231,6 +222,18 @@ contract Strategy is BaseStrategy {
         return want.balanceOf(address(this));
     }
 
+    function _withdrawSome(uint256 _amount) internal returns (uint256) {
+        uint256 balanceOfWantBefore = balanceOfWant();
+        daiIdle.redeemIdleToken(
+            _amount.mul(_getDaiPrice()).div(
+                daiIdle.tokenPriceWithFee(address(this))
+            )
+        );
+
+        _swapDaiToLusd(_amount);
+        return balanceOfWant().sub(balanceOfWantBefore);
+    }
+
     // NOTE: Can override `tendTrigger` and `harvestTrigger` if necessary
 
     function prepareMigration(address _newStrategy) internal override {
@@ -277,10 +280,9 @@ contract Strategy is BaseStrategy {
         returns (uint256)
     {
         if (useUmb) {
-            (uint256 price, ) =
-                umbrella.getCurrentValue(
-                    0x000000000000000000000000000000000000000000000000004554482d555344
-                );
+            (uint256 price, ) = umbrella.getCurrentValue(
+                0x000000000000000000000000000000000000000000000000004554482d555344
+            );
             return price.mul(_amtInWei);
         }
 
@@ -290,27 +292,14 @@ contract Strategy is BaseStrategy {
 
     function _getDaiPrice() internal view returns (uint256) {
         if (useUmb) {
-            (uint256 price, ) =
-                umbrella.getCurrentValue(
-                    0x000000000000000000000000000000000000000000000000004441492d555344
-                );
+            (uint256 price, ) = umbrella.getCurrentValue(
+                0x000000000000000000000000000000000000000000000000004441492d555344
+            );
             return price;
         }
 
         (, int256 price, , , ) = daiFeed.latestRoundData();
         return uint256(price).mul(10000000000);
-    }
-
-    function _withdrawSome(uint256 _amount) internal returns (uint256) {
-        uint256 balanceOfWantBefore = balanceOfWant();
-        daiIdle.redeemIdleToken(
-            _amount.mul(_getDaiPrice()).div(
-                daiIdle.tokenPriceWithFee(address(this))
-            )
-        );
-
-        _swapDaiToLusd(_amount);
-        return balanceOfWant().sub(balanceOfWantBefore);
     }
 
     function _swapLusdToDai(uint256 _amount) internal {
